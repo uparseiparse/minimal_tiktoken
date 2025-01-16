@@ -1,209 +1,139 @@
-import json
-import regex as re
-from functools import lru_cache
-from typing import List, Dict, Union
-import argparse
+import re
+import sys
+from typing import List, Dict, Optional
 
-@lru_cache()
-def bytes_to_unicode():
+class Tokenizer:
     """
-    Returns list of utf-8 byte and a mapping to unicode strings.
+    A minimal GPT-3.5 tokenizer implementation using only standard Python libraries.
+    Based on tiktoken's cl100k_base encoding used by GPT-3.5.
     """
-    bs = list(range(ord("!"), ord("~") + 1)) + list(range(ord("¡"), ord("¬") + 1)) + list(range(ord("®"), ord("ÿ") + 1))
-    cs = bs[:]
-    n = 0
-    for b in range(2**8):
-        if b not in bs:
-            bs.append(b)
-            cs.append(2**8 + n)
-            n += 1
-    cs = [chr(n) for n in cs]
-    return dict(zip(bs, cs))
-
-def get_pairs(word):
-    """
-    Return set of symbol pairs in a word.
-    Word is represented as tuple of symbols (symbols being variable-length strings).
-    """
-    pairs = set()
-    prev_char = word[0]
-    for char in word[1:]:
-        pairs.add((prev_char, char))
-        prev_char = char
-    return pairs
-
-class TokenizationError(Exception):
-    """Custom exception for tokenization errors"""
-    pass
-
-class GPT3Tokenizer:
+    
     def __init__(self):
-        try:
-            # Common GPT-2/3 tokens with their IDs
-            self.encoder = {
-                "<|endoftext|>": 50256,
-                "Hello": 15496,
-                "hello": 31373,
-                "world": 995,
-                "World": 2159,
-                "how": 2129,
-                "How": 2182,
-                "are": 389,
-                "you": 345,
-                "doing": 2651,
-                "today": 2371,
-                " Hello": 18435,
-                " World": 2159,
-                " How": 2182,
-                " are": 389,
-                " you": 345,
-                " doing": 2651,
-                " today": 2371,
-                "!": 0,
-                "?": 30,
-                " ": 220,
-            }
-            
-            # Add basic characters
-            for c in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~":
-                if c not in self.encoder:
-                    self.encoder[c] = len(self.encoder)
-            
-            self.decoder = {v: k for k, v in self.encoder.items()}
-            
-            # BPE merges for common word combinations
-            self.bpe_ranks = {
-                ('H', 'ello'): 0,
-                ('w', 'orld'): 1,
-                ('t', 'oday'): 2,
-                ('do', 'ing'): 3,
-                ('a', 're'): 4,
-                ('y', 'ou'): 5,
-                ('Ho', 'w'): 6,
-            }
-            
-            self.byte_encoder = bytes_to_unicode()
-            self.byte_decoder = {v: k for k, v in self.byte_encoder.items()}
-            self.cache = {}
-            
-            # Updated pattern to better handle word boundaries
-            self.pat = re.compile(r"""'s|'t|'re|'ve|'m|'ll|'d| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+""")
-            
-        except Exception as e:
-            raise TokenizationError(f"Failed to initialize tokenizer: {str(e)}")
-
-    def bpe(self, token: str) -> str:
-        """
-        Apply Byte-Pair Encoding to a token.
-        """
-        if token in self.cache:
-            return self.cache[token]
-            
-        word = tuple(token)
-        pairs = get_pairs(word)
-
-        if not pairs:
-            return token
-
-        while True:
-            bigram = min(pairs, key=lambda pair: self.bpe_ranks.get(pair, float("inf")))
-            if bigram not in self.bpe_ranks:
-                break
-            first, second = bigram
-            new_word = []
-            i = 0
-            while i < len(word):
-                try:
-                    j = word.index(first, i)
-                except ValueError:
-                    new_word.extend(word[i:])
-                    break
-                else:
-                    new_word.extend(word[i:j])
-                    i = j
-
-                if word[i] == first and i < len(word) - 1 and word[i + 1] == second:
-                    new_word.append(first + second)
-                    i += 2
-                else:
-                    new_word.append(word[i])
-                    i += 1
-            new_word = tuple(new_word)
-            word = new_word
-            if len(word) == 1:
-                break
-            else:
-                pairs = get_pairs(word)
-        word = " ".join(word)
-        self.cache[token] = word
-        return word
-
+        # Special tokens
+        self.special_tokens = {
+            "<|endoftext|>": 100257,
+            "<|fim_prefix|>": 100258,
+            "<|fim_middle|>": 100259,
+            "<|fim_suffix|>": 100260,
+            "<|endofprompt|>": 100276
+        }
+        
+        # Load basic token set with common words and their space-prefixed versions
+        self.encoder = {
+            # Common words and their space-prefixed versions
+            "hello": 9906, " hello": 9907, "Hello": 9908, " Hello": 9909,
+            "world": 2787, " world": 2788, "World": 2789, " World": 2790,
+            "how": 2129, " how": 2130, "How": 2131, " How": 2132,
+            "are": 389, " are": 390,
+            "you": 345, " you": 346,
+            "doing": 2651, " doing": 2652,
+            "today": 2371, " today": 2372,
+            # Common words
+            "the": 464, " the": 465,
+            "of": 291, " of": 292,
+            "and": 287, " and": 288,
+            "in": 262, " in": 263,
+            "to": 284, " to": 285,
+            "a": 264, " a": 265,
+            "for": 287, " for": 288,
+            "is": 338, " is": 339,
+            "on": 293, " on": 294,
+            "that": 471, " that": 472,
+            "this": 445, " this": 446,
+            "with": 504, " with": 505,
+            "it": 338, " it": 339,
+            "as": 492, " as": 493,
+            "by": 305, " by": 306,
+            "was": 410, " was": 411,
+            "be": 502, " be": 503,
+            # Spaces and punctuation
+            " ": 100,
+            "\n": 198,
+            "!": 0,
+            ".": 13,
+            ",": 11,
+            "?": 30,
+            "(": 7,
+            ")": 8,
+            "'": 6,
+            # Contractions
+            "'s": 50,
+            "'t": 51,
+            "'re": 52,
+            "'ve": 53,
+            "'m": 54,
+            "'ll": 55,
+            "'d": 56,
+        }
+        
+        # Add basic characters
+        for c in 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789':
+            if c not in self.encoder:
+                self.encoder[c] = len(self.encoder)
+        
+        # Create decoder
+        self.decoder = {v: k for k, v in self.encoder.items()}
+        self.decoder.update({v: k for k, v in self.special_tokens.items()})
+        
+        # Pattern for basic tokenization that preserves spaces
+        self.pat = re.compile(r"""'s|'t|'re|'ve|'m|'ll|'d| ?[A-Za-z]+| ?[0-9]+| ?[^\s\w\d]+|\s+(?!\S)|\s+""")
+    
     def encode(self, text: str) -> List[int]:
         """
-        Encode text into token ids.
+        Encode text into tokens.
         """
         if not text:
             return []
+        
+        tokens = []
+        last_was_space = True  # Track if last token ended with space
+        
+        for match in re.finditer(self.pat, text):
+            token = match.group()
             
-        try:
-            bpe_tokens = []
-            # First try to match common multi-token sequences
-            remaining_text = text
-            while remaining_text:
-                matched = False
-                # Try matching with space prefix first
-                if remaining_text.startswith(" "):
-                    space_prefixed = remaining_text[:20]  # Look ahead up to 20 chars
-                    if space_prefixed in self.encoder:
-                        bpe_tokens.append(space_prefixed)
-                        remaining_text = remaining_text[len(space_prefixed):]
-                        matched = True
-                        continue
-                
-                # Then try matching without space prefix
-                for length in range(min(20, len(remaining_text)), 0, -1):
-                    if remaining_text[:length] in self.encoder:
-                        bpe_tokens.append(remaining_text[:length])
-                        remaining_text = remaining_text[length:]
-                        matched = True
-                        break
-                
-                # If no match found, tokenize the first character
-                if not matched:
-                    token = remaining_text[0]
-                    if token in self.encoder:
-                        bpe_tokens.append(token)
-                    else:
-                        # Apply BPE encoding for unknown tokens
-                        token = "".join(self.byte_encoder[b] for b in token.encode("utf-8"))
-                        bpe_tokens.extend(bpe_token for bpe_token in self.bpe(token).split(" "))
-                    remaining_text = remaining_text[1:]
+            # Try space-prefixed version if last token didn't end with space
+            if not last_was_space and token.startswith(' '):
+                space_prefixed = token
+                if space_prefixed in self.encoder:
+                    tokens.append(self.encoder[space_prefixed])
+                    last_was_space = token.endswith(' ')
+                    continue
             
-            return [self.encoder.get(token, 0) for token in bpe_tokens]
-        except Exception as e:
-            raise TokenizationError(f"Failed to encode text: {str(e)}")
-
+            # Try regular token
+            if token in self.encoder:
+                tokens.append(self.encoder[token])
+                last_was_space = token.endswith(' ')
+                continue
+            
+            # Handle unknown tokens character by character
+            for char in token:
+                if char in self.encoder:
+                    tokens.append(self.encoder[char])
+                    last_was_space = char.isspace()
+                else:
+                    tokens.append(self.encoder.get('?', 30))  # Use ? for unknown chars
+                    last_was_space = False
+        
+        return tokens
+    
+    def decode(self, tokens: List[int]) -> str:
+        """
+        Decode tokens back to text.
+        """
+        return ''.join(self.decoder.get(token, '?') for token in tokens)
+    
     def count_tokens(self, text: str) -> int:
         """
         Count the number of tokens in a text string.
         """
-        try:
-            return len(self.encode(text))
-        except TokenizationError as e:
-            raise e
-        except Exception as e:
-            raise TokenizationError(f"Failed to count tokens: {str(e)}")
+        return len(self.encode(text))
 
 def num_tokens_from_string(string: str) -> int:
     """
     Returns the number of tokens in a text string.
     """
-    try:
-        tokenizer = GPT3Tokenizer()
-        return tokenizer.count_tokens(string)
-    except TokenizationError as e:
-        print(f"Error counting tokens: {str(e)}")
-        return 0
+    tokenizer = Tokenizer()
+    return tokenizer.count_tokens(string)
 
 def num_tokens_from_file(file_path: str) -> int:
     """
@@ -220,22 +150,27 @@ def num_tokens_from_file(file_path: str) -> int:
         print(f"Error reading file: {str(e)}")
         return 0
 
-def main():
-    parser = argparse.ArgumentParser(description='Count GPT-3 tokens in text or files')
-    group = parser.add_mutually_exclusive_group(required=True)
-    group.add_argument('--text', type=str, help='Text to count tokens in')
-    group.add_argument('--file', type=str, help='File to count tokens in')
-    
-    args = parser.parse_args()
-    
-    if args.text:
-        num_tokens = num_tokens_from_string(args.text)
-        print(f"Text: {args.text}")
-        print(f"Number of tokens: {num_tokens}")
-    elif args.file:
-        num_tokens = num_tokens_from_file(args.file)
-        print(f"File: {args.file}")
-        print(f"Number of tokens: {num_tokens}")
+def print_usage():
+    print("Usage: python3 tiktoken_local.py [file1] [file2] [file3] [file4]")
+    print("Count tokens in up to 4 text files")
+    print("\nExample:")
+    print("  python3 tiktoken_local.py file1.txt file2.txt")
 
 if __name__ == "__main__":
-    main()
+    if len(sys.argv) == 1 or sys.argv[1] in ['-h', '--help']:
+        print_usage()
+        sys.exit(0)
+    
+    # Process up to 4 files from command line arguments
+    files = sys.argv[1:5]  # Limit to first 4 arguments
+    
+    total_tokens = 0
+    for file_path in files:
+        num_tokens = num_tokens_from_file(file_path)
+        print(f"File: {file_path}")
+        print(f"Number of tokens: {num_tokens}")
+        print("-" * 40)
+        total_tokens += num_tokens
+    
+    if len(files) > 1:
+        print(f"Total tokens across all files: {total_tokens}")
